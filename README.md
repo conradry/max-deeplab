@@ -1,2 +1,3 @@
-# max-deeplab
-Unofficial implementation of MaX-DeepLab for Instance Segmentation
+# MaX-DeepLab
+
+Unofficial implementation of MaX-DeepLab for Instance Segmentation.
