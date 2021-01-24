@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from torchvision.models.resnet import Bottleneck, BasicBlock
 from einops import rearrange
 
+#NO DECAY ON POSITION EMBEDDINGS AND BATCHNORM
+
 class conv_bn_relu(nn.Module):
     def __init__(
         self,
@@ -40,7 +42,7 @@ class InceptionStem(nn.Module):
             conv_bn_relu(nin, nout // 2, 3, stride=2, padding=1),
             conv_bn_relu(nout // 2, nout // 2, 3, stride=1, padding=1),
             conv_bn_relu(nout // 2, nout, 3, stride=1, padding=1),
-            nn.MaxPool2d(3, stride=2)
+            nn.MaxPool2d(3, stride=2, padding=1)
         )
 
     def forward(self, x):
@@ -174,9 +176,6 @@ class AxialBottleneck(nn.Module):
     ):
         super(AxialBottleneck, self).__init__()
 
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
-
         width = int(nplanes * (base_width / 64.))
 
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
@@ -200,7 +199,7 @@ class AxialBottleneck(nn.Module):
         identity = x
 
         out = self.conv1(x)
-        out = self.axial_attn
+        out = self.axial_attn(out)
         out = self.conv2(out)
 
         if self.downsample is not None:
@@ -232,149 +231,376 @@ class MemoryQKV(nn.Module):
         return self.mem_qkv(x)
 
 class DualPathXF(nn.Module):
-    expansion = 1
+
+    expansion = 4
+
     def __init__(
         self,
         nin_pixel,
+        nplanes,
         nin_memory,
-        n_heads=n_heads,
-        kernel_size=20,
+        stride=1,
+        downsample=None,
+        base_width=64,
+        n_heads=8,
+        kernel_size=20
     ):
-        super(DualPathXF).__init__()
-        self.p2p = AxialBottleneck(nin, nout, n_heads, kernel_size=kernel_size)
+        super(DualPathXF, self).__init__()
+
+        self.p2p = AxialBottleneck(
+            nin_pixel, nplanes, stride, downsample, base_width=base_width,
+            n_heads=n_heads, kernel_size=kernel_size
+        )
 
         #I'm assuming that attention is multihead
         #it's never stated explicitly...
 
         #pixel qkv
         #maybe another conv before?
-        self.p2m_conv1 = conv_bn_relu(nin_pixel, nin_pixel, 1)
+        nin_pixel = nplanes * self.expansion
+        self.p2m_conv1 = conv_bn_relu(nin_pixel, nplanes, 1)
         self.p2m_qkv = nn.Sequential(
-            nn.Conv2d(nin_pixel, nin_pixel * 2, kernel_size=1, bias=False),
-            nn.BatchNorm2d(nin_pixel * 2)
+            nn.Conv2d(nplanes, nplanes * 2, kernel_size=1, bias=False),
+            nn.BatchNorm2d(nplanes * 2)
         )
         self.p2m_conv2 = nn.Sequential(
-            nn.Conv2d(nin_pixel, nin_pixel, kernel_size=1, bias=False),
-            nn.BatchNorm2d(nin_pixel)
+            nn.Conv2d(nplanes, nplanes * self.expansion, kernel_size=1, bias=False),
+            nn.BatchNorm2d(nplanes * self.expansion)
         )
 
         #memory qkv
         self.mem_fc1 = nn.Sequential(
-            nn.Linear(nin_memory, nin_pixel),
-            nn.ReLU(inplace=True) #is there a relu, what about normalization?
+            nn.Linear(nin_memory, nplanes),
+            nn.ReLU(inplace=True) #should there be a relu? what about normalization?
         )
-        self.mem_qkv = nn.Linear(nin_pixel, nin_pixel * 2) #normalization layer?
-        self.mem_fc2 = nn.Linear(nin_pixel, nin_memory) #normalization layer?
+        self.mem_qkv = nn.Linear(nplanes, nplanes * 2) #normalization layer?
+        self.mem_fc2 = nn.Linear(nplanes, nin_memory) #normalization layer?
         self.relu = nn.ReLU(inplace=True)
 
         self.mem_ffn = nn.Sequential(
-            nn.Linear(nin_memory, nin_pixel),
+            nn.Linear(nin_memory, nplanes),
             nn.ReLU(inplace=True), #again, normalization layer?
-            nn.Linear(nin_pixel, nin_memory)
+            nn.Linear(nplanes, nin_memory)
         )
 
         #useful dimensions
-        self.head_nin = nout // n_heads
+        self.n_heads = n_heads
+        self.head_nin = nplanes // n_heads
         self.dq = self.head_nin // 2
         self.dv = self.head_nin
 
-        def forward(self, P, M):
-            #useful dimensions
-            B, C, H, W = P.size()
-            N, B, K = M.size()
-            n_heads = self.n_heads #labeled 'i' in einsums
-            head_nin = self.head_nin
-            dq = self.dq
-            dv = self.dv
+    def forward(self, x_dict):
+        P = x_dict['pixel']
+        M = x_dict['memory']
+        #print('here')
+        #useful dimensions
+        B, C, H, W = P.size()
+        N, B, K = M.size()
+        n_heads = self.n_heads #labeled 'i' in einsums
+        head_nin = self.head_nin
+        dq = self.dq
+        dv = self.dv
 
-            #P is pixel (image), M is memory
-            P = self.p2p(P)
-            P_identity = P
-            M_identity = M
+        #P is pixel (image), M is memory
+        P = self.p2p(P)
+        P_identity = P
+        M_identity = M
 
-            #apply image path qkv
-            #(B, C_out * 2, H, W)
-            P_qkv = self.p2m_conv1(P)
-            P_qkv = self.p2m_qkv(P_qkv)
-            P_qkv = rearrange(P_qkv, 'b (i j) h w -> b i j h w', i=n_heads, j=head_nin * 2)
-            qp, kp, vp = torch.split(P_qkv, [dq, dq, dv], dim=2)
+        #apply image path qkv
+        #(B, C_out * 2, H, W)
+        P_qkv = self.p2m_conv1(P)
+        P_qkv = self.p2m_qkv(P_qkv)
+        P_qkv = rearrange(P_qkv, 'b (i j) h w -> b i j h w', i=n_heads, j=head_nin * 2)
+        qp, kp, vp = torch.split(P_qkv, [dq, dq, dv], dim=2)
 
-            #(N, B, K)
-            M_qkv = self.mem_fc1(M)
-            M_qkv = self.mem_qkv(M_qkv)
-            M_qkv = rearrange(M_qkv, 'n b (i j) -> n b i j', i=n_heads, j=head_nin * 2)
-            qm, km, vm = torch.split(M_qkv, [dq, dq, dv], dim=3)
+        #(N, B, K)
+        M_qkv = self.mem_fc1(M)
+        M_qkv = self.mem_qkv(M_qkv)
+        M_qkv = rearrange(M_qkv, 'n b (i j) -> n b i j', i=n_heads, j=head_nin * 2)
+        qm, km, vm = torch.split(M_qkv, [dq, dq, dv], dim=3)
 
-            #P2M output it ypa in paper
-            #qp: (B, n_heads, dq, h, w), km: (N, B, n_heads, dq)
-            p2m = torch.einsum('bijhw,nbij->bnihw', qp, km) #(B, N, n_heads, H, W)
-            p2m_attn = F.softmax(p2m, dim=1)
-            ypa = torch.einsum('bnihw,nbij->bijhw', p2m_attn, vm) #(B, n_heads, head_nin, H, W)
+        #P2M output it ypa in paper
+        #qp: (B, n_heads, dq, h, w), km: (N, B, n_heads, dq)
+        p2m = torch.einsum('bijhw,nbij->bnihw', qp, km) #(B, N, n_heads, H, W)
+        p2m_attn = F.softmax(p2m, dim=1)
+        ypa = torch.einsum('bnihw,nbij->bijhw', p2m_attn, vm) #(B, n_heads, head_nin, H, W)
 
-            #handle m2p and m2m together
-            kp = rearrange(kp, 'b i j h w -> b i j (h w)')
-            km = rearrange(km, 'n b i j -> b i j n')
-            kpm = torch.cat([kp, km], dim=2) #(B, n_heads, dq * 2, H * W + N)
+        #handle m2p and m2m together
+        kp = rearrange(kp, 'b i j h w -> b i j (h w)')
+        km = rearrange(km, 'n b i j -> b i j n')
+        kpm = torch.cat([kp, km], dim=3) #(B, n_heads, dq * 2, H * W + N)
 
-            vp = rearrange(vp, 'b i j h w -> b i j (h w)')
-            vm = rearrange(vm, 'n b i j -> b i j n')
-            vpm = torch.cat([vp, vm], dim=2) #(B, n_heads, dv * 2, H * W + N)
+        vp = rearrange(vp, 'b i j h w -> b i j (h w)')
+        vm = rearrange(vm, 'n b i j -> b i j n')
+        vpm = torch.cat([vp, vm], dim=3) #(B, n_heads, dv * 2, H * W + N)
 
-            m2m_m2p = torch.einsum('nbij,bijl->nbil', qm, kpm) #(N, B, n_heads, H * W + N)
-            m2m_m2p_attn = F.softmax(m2m_m2p, dim=-1)
-            ymb = torch.einsum('nbil,bijl->nbij', m2m_m2p_attn, vpm) #(N, B, n_heads, head_nin)
+        m2m_m2p = torch.einsum('nbij,bijl->nbil', qm, kpm) #(N, B, n_heads, H * W + N)
+        m2m_m2p_attn = F.softmax(m2m_m2p, dim=-1)
+        ymb = torch.einsum('nbil,bijl->nbij', m2m_m2p_attn, vpm) #(N, B, n_heads, head_nin)
 
-            P_out = self.p2m_conv2(rearrange(ypa, 'b i j h w -> b (i j) h w'))
-            P_out += P_identity
-            P_out = self.relu(P_out)
+        P_out = self.p2m_conv2(rearrange(ypa, 'b i j h w -> b (i j) h w'))
+        P_out += P_identity
+        P_out = self.relu(P_out)
 
-            M_out = self.mem_fc2(rearrange(ymb, 'n b i j -> n b (i j)'))
-            M_out += M_identity
-            M_out = self.relu(M_out)
+        M_out = self.mem_fc2(rearrange(ymb, 'n b i j -> n b (i j)'))
+        M_out += M_identity
+        M_out = self.relu(M_out)
 
-            M_ffn = self.mem_ffn(M_out)
-            M_out += M_ffn
-            M_out = self.relu(M_out)
+        M_ffn = self.mem_ffn(M_out)
+        M_out += M_ffn
+        M_out = self.relu(M_out)
 
-            return P_out, M_out
+        return {'pixel': P_out, 'memory': M_out}
 
-def MaXDeepLabSEncoder(nn.Module):
+class MaXDeepLabSEncoder(nn.Module):
     def __init__(
         self,
-        blocks=[Bottleneck, Bottleneck, AxialBottleneck, DualPathXF],
         layers=[3, 4, 6, 3],
-        im_size=640
+        im_size=640,
+        nin_memory=256,
+        n_heads=8
     ):
         super(MaXDeepLabSEncoder, self).__init__()
 
         self.base_width = 64
-        self.nin = 128
-        self.stem = InceptionStem(3, self.nin)
+        self.nin = 64
+        self.nin_memory = nin_memory
+        self.stem = InceptionStem(3, 128)
 
-        self.layer1 = self._make_layer(blocks[0], 64, layers[0])
+        self.layer1 = self._make_bottleneck_layer(64, layers[0], stride=1, first_layer=True)
+        self.layer2 = self._make_bottleneck_layer(128, layers[1], stride=2)
 
-    def _make_layer(
+        kernel_size = im_size // 8
+        self.layer3 = self._make_axial_layer(
+            256, layers[2], stride=2, n_heads=n_heads, kernel_size=kernel_size
+        )
+
+        kernel_size = im_size // 16
+        self.layer4 = self._make_dualpath_layer(
+            512, layers[2], n_heads=n_heads, kernel_size=kernel_size
+        )
+
+    def _make_bottleneck_layer(
         self,
-        block,
         planes,
         n_blocks,
         stride=1,
-        **kwargs
+        first_layer=False
     ):
+        block = Bottleneck
+        downsample = None
+        first_block_nin = self.nin * 2 if first_layer else self.nin
+
+        if stride != 1 or self.nin != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(first_block_nin, planes * block.expansion, 1, stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion)
+            )
+
+        layers = []
+        layers.append(
+            block(first_block_nin, planes, stride, downsample, base_width=self.base_width)
+        )
+        self.nin = planes * block.expansion
+        for _ in range(1, n_blocks):
+            layers.append(
+                block(self.nin, planes, base_width=self.base_width)
+            )
+
+        return nn.Sequential(*layers)
+
+    def _make_axial_layer(
+        self,
+        planes,
+        n_blocks,
+        stride=1,
+        n_heads=8,
+        kernel_size=56
+    ):
+        block = AxialBottleneck
         downsample = None
         if stride != 1 or self.nin != planes * block.expansion:
             downsample = nn.Sequential(
                 nn.Conv2d(self.nin, planes * block.expansion, 1, stride, bias=False),
-                nn.BatchNorm2d(nin_pixel)
+                nn.BatchNorm2d(planes * block.expansion)
             )
 
         layers = []
-        layers.append(block(self.nin, planes, stride, downsample,
-                            self.base_width, previous_dilation, norm_layer))
-        self.inplanes = planes * block.expansion
-        for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes, groups=self.groups,
-                                base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer))
+        layers.append(
+            block(self.nin, planes, stride, downsample, self.base_width,
+            n_heads=n_heads, kernel_size=kernel_size
+            )
+        )
+
+        self.nin = planes * block.expansion
+        kernel_size = kernel_size // stride
+        for _ in range(1, n_blocks):
+            layers.append(
+                block(self.nin, planes, base_width=self.base_width,
+                n_heads=n_heads, kernel_size=kernel_size)
+            )
 
         return nn.Sequential(*layers)
+
+    def _make_dualpath_layer(
+        self,
+        planes,
+        n_blocks,
+        stride=1,
+        base_width=64,
+        n_heads=8,
+        kernel_size=20
+    ):
+        block = DualPathXF
+        downsample = None
+        if stride != 1 or self.nin != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.nin, planes * block.expansion, 1, stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion)
+            )
+
+        layers = []
+        layers.append(
+            block(self.nin, planes, self.nin_memory, stride, downsample,
+            base_width=base_width, n_heads=n_heads, kernel_size=kernel_size)
+        )
+
+        self.nin = planes * block.expansion
+        kernel_size = kernel_size // stride
+        for _ in range(1, n_blocks):
+            layers.append(
+                block(self.nin, planes, self.nin_memory, stride,
+                base_width=base_width, n_heads=n_heads, kernel_size=kernel_size)
+            )
+
+        return nn.Sequential(*layers)
+
+    def forward(self, P, M):
+        P1 = self.stem(P) #H / 4
+        P2 = self.layer1(P1) #H / 4
+        P3 = self.layer2(P2) #H / 8
+        P4 = self.layer3(P3) #H / 16
+        DP = self.layer4({'pixel': P4, 'memory': M}) #H / 16
+        P5, M = DP['pixel'], DP['memory']
+
+        return [P1, P2, P3, P4, P5], M
+
+class DecoderBottleneck(nn.Module):
+    def __init__(
+        self,
+        nin,
+        nplanes,
+        upsample_factor=2,
+        compression=4
+    ):
+        super(DecoderBottleneck, self).__init__()
+        self.upsample = nn.Upsample(
+            scale_factor=upsample_factor, mode='bilinear', align_corners=True
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+        #see Fig 9. of https://arxiv.org/abs/2003.07853
+        self.identity_path = nn.Sequential(
+            conv_bn_relu(nin, nin // compression, kernel_size=1),
+            self.upsample
+        )
+
+        self.bottleneck_path = nn.Sequential(
+            conv_bn_relu(nin, nplanes, kernel_size=1),
+            self.upsample,
+            conv_bn_relu(nin, nplanes, kernel_size=3, padding=1),
+            nn.Conv2d(nin, nin // compression, 1, bias=False),
+            nn.BatchNorm2d(nin // compression)
+        )
+
+        self.encoder_feature_path = nn.Sequential(
+            conv_bn_relu(nin, nin // compression, kernel_size=1),
+            self.upsample
+        )
+
+        #self.proj_down = conv_bn_relu(nin, nin // compression, kernel_size=1)
+
+    def forward(self, x, skip):
+        identity = self.identity_path(x)
+        bottleneck_out = self.bottleneck_path(x)
+        skip_out = self.encoder_feature_path(skip)
+
+        return self.relu(identity + bottleneck_out + skip_out)
+
+class MaskHead(nn.Module):
+    def __init__(
+        self,
+        nplanes,
+        kernel_size=5,
+        padding=2,
+        separable=True
+    ):
+        super(MaskHead, self).__init__()
+        groups = nplanes if separable else 1
+        self.conv5x5 = conv_bn_relu(
+            nplanes, nplanes, kernel_size, padding=padding, groups=groups
+        )
+        self.conv1x1 = nn.Conv2d(nplanes, nplanes, kernel_size=1)
+
+    def forward(self, x):
+        return self.conv1x1(self.conv5x5(x))
+
+
+class MaXDeepLabSDecoder(nn.Module):
+    def __init__(
+        self,
+        nin_pixel,
+        nplanes,
+        nin_memory,
+        im_size=640,
+        n_heads=8,
+        num_classes=19
+    ):
+        super(MaXDeepLabSDecoder, self).__init__()
+        self.dual_path = DualPathXF(
+            nin_pixel, nplanes, nin_memory,
+            base_width=64, n_heads=8, kernel_size=im_size // 16
+        )
+
+        self.bottleneck1 = DecoderBottleneck(
+            nin_pixel, nplanes, upsample_factor=2, compression=4
+        )
+
+        nin_pixel = nin_pixel // 4
+        nplanes = nplanes // 4
+        self.bottleneck2 = DecoderBottleneck(
+            nin_pixel, nplanes, upsample_factor=2, compression=2
+        )
+
+        nin_pixel = nin_pixel // 2
+        self.mask_head = MaskHead(nin_pixel)
+
+        self.mem_mask = nn.Linear(nin_memory, nin_pixel)
+        self.mem_class = nn.Linear(nin_memory, num_classes)
+
+    def forward(self, P_features, M):
+        P1, P2, P3, P4, P5 = P_features
+        dp_out = self.dual_path({'pixel': P5, 'memory': M})
+        P_up, M = dp_out['pixel'], dp_out['memory']
+
+        P_up = self.bottleneck1(P_up, P3)
+        P_up = self.bottleneck2(P_up, P2)
+        mask_up = self.mask_head(P_up) #(B, D, H/4, W/4)
+
+        #handle memory multiplication
+        mem_mask = self.mem_mask(M) #(N, B, D)
+        mask_out = torch.einsum('nbd,bdhw->bnhw', mem_mask, mask_up)
+
+        classes = self.mem_class(M) #(N, B, num_classes)
+        classes = rearrange('n b c -> b n c')
+
+        return mask_out, classes
+
+#OFF by roughly 4 million parameters
+#maybe 1 too many conv layers somewhere?
+
+class MaXDeepLabS(nn.Module):
+    def __init__(self):
+        super(MaXDeepLabS, self).__init__()
+        self.encoder = MaXDeepLabSEncoder(im_size=640)
+        self.decoder = MaXDeepLabSDecoder(2048, 512, 256, 640, 8, 19)
