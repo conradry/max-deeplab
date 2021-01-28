@@ -3,7 +3,7 @@
 Unofficial implementation of MaX-DeepLab for Instance Segmentation: https://arxiv.org/abs/2012.00759v1.
 
 <figure>
-  <img src="./architecture.png"></img>
+  <img height=300 src="./architecture.png"></img>
 </figure>
 
 ## Current Status
