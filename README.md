@@ -29,22 +29,22 @@ MaX-DeepLab has a complex architecture, training procedure and loss function; an
 ```python
 from max_deeplab.model import MaXDeepLabS
 
-model = MaXDeepLabS(im_size=64)
+model = MaXDeepLabS(im_size=64, n_classes=80)
 
 P = torch.randn((4, 3, 64, 64))
 M = torch.randn((50, 4, 256))
 
 mask_out, classes = model(P, M)
 print(mask_out.shape, classes.shape)
->>> (torch.Size([4, 50, 16, 16]), torch.Size([4, 50, 80]))
+>>> (torch.Size([4, 50, 64, 64]), torch.Size([4, 50, 80]))
 
 num_params = []
 for pn, p in model.named_parameters():
     num_params.append(np.prod(p.size()))
 
 print(f'{sum(num_params):,} total parameters.')
->>> 61,533,648 total parameters.
+>>> 61,849,316 total parameters.
 
 ```
 
-(Reported number of parameters in the paper is 61.9M, maybe missing a single layer somewhere? Best guess is that the DecoderBottleneck is the culprit.)
+(Reported number of parameters in the paper is 61.9M)

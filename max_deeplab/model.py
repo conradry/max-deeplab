@@ -142,7 +142,8 @@ class MaXDeepLabSDecoder(nn.Module):
         nin_memory=256,
         im_size=640,
         n_heads=8,
-        n_classes=19
+        n_classes=19,
+        n_masks=50
     ):
         super(MaXDeepLabSDecoder, self).__init__()
         self.dual_path = DualPathXF(
@@ -163,8 +164,20 @@ class MaXDeepLabSDecoder(nn.Module):
         nin_pixel = nin_pixel // 2
         self.mask_head = MaskHead(nin_pixel)
 
-        self.mem_mask = linear_bn_relu(nin_memory, nin_pixel, with_relu=False)
-        self.mem_class = nn.Linear(nin_memory, n_classes)
+        self.mem_mask = nn.Sequential(
+            linear_bn_relu(nin_memory, nin_memory),
+            linear_bn_relu(nin_memory, nin_pixel, with_relu=False)
+        )
+        self.mem_class = nn.Sequential(
+            linear_bn_relu(nin_memory, nin_memory),
+            nn.Linear(nin_memory, nin_pixel)
+        )
+
+        self.fg_bn = nn.BatchNorm2d(n_masks)
+        self.upsample = nn.Upsample(
+            scale_factor=4, mode='bilinear', align_corners=True
+        )
+
 
     def forward(self, P_features, M):
         P1, P2, P3, P4, P5 = P_features
@@ -178,6 +191,8 @@ class MaXDeepLabSDecoder(nn.Module):
         #handle memory multiplication
         mem_mask = self.mem_mask(M) #(N, B, D)
         mask_out = torch.einsum('nbd,bdhw->bnhw', mem_mask, mask_up)
+        mask_out = self.fg_bn(mask_out)
+        mask_out = self.upsample(mask_out)
 
         classes = self.mem_class(M) #(N, B, n_classes)
         classes = rearrange(classes, 'n b c -> b n c')
@@ -189,11 +204,15 @@ class MaXDeepLabS(nn.Module):
         self,
         im_size=640,
         n_heads=8,
-        n_classes=80
+        n_classes=80,
+        n_masks=50
     ):
         super(MaXDeepLabS, self).__init__()
         self.encoder = MaXDeepLabSEncoder(im_size=im_size, n_heads=n_heads)
-        self.decoder = MaXDeepLabSDecoder(im_size=im_size, n_heads=n_heads, n_classes=n_classes)
+        self.decoder = MaXDeepLabSDecoder(
+            im_size=im_size, n_heads=n_heads,
+            n_classes=n_classes, n_masks=n_masks
+        )
 
     def forward(self, P, M):
         """

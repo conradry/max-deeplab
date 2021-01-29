@@ -225,8 +225,8 @@ class AxialBottleneck(nn.Module):
         width = int(nplanes * (base_width / 64.))
         self.axial_net = nn.Sequential(
             conv_bn_relu(nin, width, kernel_size=1),
-            AxialMultiHeadAttention(width, width, n_heads, kernel_size, axis='width'),
-            AxialMultiHeadAttention(width, width, n_heads, kernel_size, stride=stride, axis='height'),
+            AxialMultiHeadAttention(width, width, n_heads, kernel_size, axis='height'),
+            AxialMultiHeadAttention(width, width, n_heads, kernel_size, stride=stride, axis='width'),
             nn.ReLU(inplace=True),
             conv_bn_relu(width, nplanes * self.expansion, kernel_size=1, with_relu=False)
         )
