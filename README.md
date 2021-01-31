@@ -13,30 +13,29 @@ This repository is under active development. Currently, only the MaX-DeepLab-S a
 - [x] Axial Attention block
 - [x] Dual Path Transformer block
 - [x] MaX-DeepLab-S architecture
-- [ ] PQ-style loss
-- [ ] Hungarian Matcher
-- [ ] Sine Position Embedding (or something better)
+- [x] Hungarian Matcher
+- [x] PQ-style loss
 - [ ] Auxiliary losses (Instance discrimination, Mask-ID cross-entropy, Semantic Segmentation)
-- [ ] Optimize model by replacing einsums
+- [ ] Optimize model runtime
 - [ ] Encoder pre-training on ImageNet
 - [ ] MaX-DeepLab-S training on COCO Panoptic
 - [ ] MaX-DeepLab-L???
 
-MaX-DeepLab has a complex architecture, training procedure and loss function; and luckily the paper is short on technical details. Any suggestions or help are appreciated.
+MaX-DeepLab has a complex architecture, training procedure and loss function. Any suggestions or help are appreciated.
 
 ## Usage
 
 ```python
 from max_deeplab.model import MaXDeepLabS
 
-model = MaXDeepLabS(im_size=64, n_classes=80)
+model = MaXDeepLabS(im_size=640, n_classes=80)
 
-P = torch.randn((4, 3, 64, 64))
+P = torch.randn((4, 3, 640, 640))
 M = torch.randn((50, 4, 256))
 
 mask_out, classes = model(P, M)
 print(mask_out.shape, classes.shape)
->>> (torch.Size([4, 50, 64, 64]), torch.Size([4, 50, 80]))
+>>> (torch.Size([4, 50, 640, 640]), torch.Size([4, 50, 80]))
 
 num_params = []
 for pn, p in model.named_parameters():
