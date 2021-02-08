@@ -162,15 +162,16 @@ class MaXDeepLabSDecoder(nn.Module):
         )
 
         nin_pixel = nin_pixel // 2
-        self.mask_head = MaskHead(nin_pixel)
+        self.mask_head = MaskHead(nin_pixel, n_masks)
 
         self.mem_mask = nn.Sequential(
             linear_bn_relu(nin_memory, nin_memory),
-            linear_bn_relu(nin_memory, nin_pixel, with_relu=False)
+            linear_bn_relu(nin_memory, n_masks, with_relu=False)
         )
+
         self.mem_class = nn.Sequential(
             linear_bn_relu(nin_memory, nin_memory),
-            nn.Linear(nin_memory, nin_pixel)
+            nn.Linear(nin_memory, n_classes)
         )
 
         self.fg_bn = nn.BatchNorm2d(n_masks)
@@ -214,12 +215,25 @@ class MaXDeepLabS(nn.Module):
             n_classes=n_classes, n_masks=n_masks
         )
 
+        self.semantic_head = nn.Sequential(
+            conv_bn_relu(2048, 256, 5, padding=2, groups=256),
+            conv_bn_relu(256, n_classes, 1, with_bn=False, with_relu=False),
+            nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True)
+        )
+
+    def forward(self, x):
+        return self.conv1x1(self.conv5x5(x))
+
     def forward(self, P, M):
         """
-        P: pixel tensor (B, 3, H, W)
+        P: pixel NestedTensor (B, 3, H, W)
         M: memory tensor (N, B, 256)
         """
 
+        #P is a nested tensor, extract the image data
+        #see utils.misc.NestedTensor
+        P, mask = P.decompose()
         fmaps, mem = self.encoder(P, M)
+        semantic_mask = self.semantic_head(fmaps[-1])
         mask_out, classes = self.decoder(fmaps, mem)
-        return mask_out, classes
+        return mask_out, classes, semantic_mask

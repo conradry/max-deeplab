@@ -112,7 +112,7 @@ class PQLoss(nn.Module):
         self.no_class_index = no_class_index
         self.matcher = HungarianMatcher()
 
-    def forward(self, input_class, input_mask, target_class, target_mask, target_sizes):
+    def forward(self, input_mask, input_class, target_mask, target_class, target_sizes):
         """
         input_class: (B, N, N_CLASSES) #logits
         input mask: (B, N, H, W) #probabilities [0, 1]
@@ -121,6 +121,7 @@ class PQLoss(nn.Module):
         """
         #apply softmax to get probabilities from logits
         B, N, num_classes = input_class.size()
+        input_mask = F.softmax(input_mask, dim=1)
         input_class_prob = F.softmax(input_class, dim=-1)
         input_mask = rearrange(input_mask, 'b n h w -> b n (h w)')
         target_mask = rearrange(target_mask, 'b k h w -> b k (h w)')
@@ -186,6 +187,10 @@ class InstanceDiscLoss(nn.Module):
         target_mask: (B, K, H, W) #m
         """
 
+        #downsample input and target by 4 to get (B, H/4, W/4)
+        mask_features = mask_features[..., ::4, ::4]
+        target_mask = target_mask[..., ::4, ::4]
+
         device = mask_features.device
 
         #eqn 16
@@ -221,6 +226,18 @@ class InstanceDiscLoss(nn.Module):
         denominator = logits.sum(-1)
         return -torch.log(numerator + self.eps / denominator + self.eps).mean()
 
+class MaskIDLoss(nn.Module):
+    def __init__(self):
+        super(MaskIDLoss, self).__init__()
+        self.xentropy = nn.CrossEntropyLoss()
+
+    def forward(self, input_mask, target_mask):
+        """
+        input_mask: (B, N, H, W) #logits
+        target_mask: (B, H, W) #long indices of maskID in N
+        """
+        return self.xentropy(input_mask, target_mask)
+
 class SemanticSegmentationLoss(nn.Module):
     def __init__(self, method='cross_entropy'):
         super(SemanticSegmentationLoss, self).__init__()
@@ -239,3 +256,48 @@ class SemanticSegmentationLoss(nn.Module):
         target_mask: (B, H, W) #long indices
         """
         return self.xentropy(input_mask, target_mask)
+
+class MaXDeepLabLoss(nn.Module):
+    def __init__(
+        self,
+        pq_loss_weight=3,
+        instance_loss_weight=1,
+        maskid_loss_weight=0.3,
+        semantic_loss_weight=1,
+        alpha=0.75,
+        temp=0.3,
+        no_class_index=-1,
+        eps=1e-5,
+    ):
+        super(MaXDeepLabLoss, self).__init__()
+        self.pqw = pq_loss_weight
+        self.idw = instance_loss_weight
+        self.miw = maskid_loss_weight
+        self.ssw = semantic_loss_weight
+        self.pq_loss = PQLoss(alpha, eps, no_class_index)
+        self.instance_loss = InstanceDiscLoss(temp, eps)
+        self.maskid_loss = MaskIDLoss()
+        self.semantic_loss = SemanticSegmentationLoss()
+
+    def forward(self, input_tuple, target_tuple):
+        """
+        input_tuple: (input_masks, input_classes, input_semantic_segmentation) Tensors
+        target_tuple: (gt_masks, gt_classes, gt_semantic_segmentation) NestedTensors
+        """
+        input_masks, input_classes, input_ss = input_tuple
+        gt_masks, gt_classes, gt_ss = [t.tensors for t in target_tuple]
+        target_sizes = target_tuple[0].sizes
+
+        pq = self.pq_loss(input_masks, input_classes, gt_masks, gt_classes, target_sizes)
+        instdisc = self.instance_loss(input_masks, gt_masks.float(), target_sizes)
+
+        #create the mask for maskid loss using argmax on ground truth
+        maskid = self.maskid_loss(input_masks, gt_masks.argmax(1))
+        semantic = self.semantic_loss(input_ss, gt_ss)
+
+        loss_items = {'pq': pq.item(), 'instdisc': instdisc.item(),
+                      'maskid': maskid.item(), 'semantic': semantic.item()}
+
+        total_loss = self.pqw * pq + self.idw * instdisc + self.miw * maskid + self.ssw * semantic
+
+        return total_loss, loss_items

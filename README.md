@@ -15,7 +15,7 @@ This repository is under active development. Currently, only the MaX-DeepLab-S a
 - [x] MaX-DeepLab-S architecture
 - [x] Hungarian Matcher
 - [x] PQ-style loss
-- [ ] Auxiliary losses (Instance discrimination, Mask-ID cross-entropy, Semantic Segmentation)
+- [x] Auxiliary losses (Instance discrimination, Mask-ID cross-entropy, Semantic Segmentation)
 - [ ] Optimize model runtime
 - [ ] Encoder pre-training on ImageNet
 - [ ] MaX-DeepLab-S training on COCO Panoptic
@@ -27,23 +27,52 @@ MaX-DeepLab has a complex architecture, training procedure and loss function. An
 
 ```python
 from max_deeplab.model import MaXDeepLabS
+from max_deeplab.losses import MaXDeepLabLoss
+from datasets.coco_panoptic import build
 
-model = MaXDeepLabS(im_size=640, n_classes=80)
+config = {}
+config['image_size'] = (640, 640)
+config['coco_path'] = '../../datasets/coco_panoptic/' #directory with image and annotation data
+data = build('train', config)
 
-P = torch.randn((4, 3, 640, 640))
-M = torch.randn((50, 4, 256))
+#create a dataloader that collates batch with padding
+#see utils.misc.collate_fn
+padding_dict = {'image': 0, 'masks': 0, 'semantic_mask': 0, 'labels': 201, 'image_id': 0} #201 is 'no_class' class
+sizes_dict = {'image': None, 'masks': 128, 'semantic_mask': None, 'labels': 128, 'image_id': None}
+collate_lambda = lambda b: collate_fn(b, padding_dict, sizes_dict)
+loader = DataLoader(data, batch_size=8, shuffle=True, collate_fn=collate_lambda)
 
-mask_out, classes = model(P, M)
-print(mask_out.shape, classes.shape)
->>> (torch.Size([4, 50, 640, 640]), torch.Size([4, 50, 80]))
+batch = iter(loader).next()
+
+#returns a dictionary of NestedTensors (each has a 'tensors' and 'sizes' attribute)
+#'sizes' is the number of ground truth masks for an image that are not from padding
+print(batch['image'].tensors.size(), batch['masks'].tensors.size(),
+batch['labels'].tensors.size(), batch['semantic_mask'].tensors.size())
+>>> (torch.Size([8, 3, 640, 640]), torch.Size([8, 128, 640, 640]), torch.Size([8, 128]), torch.Size([8, 640, 640]))
+
+model = MaXDeepLabS(im_size=640, n_classes=202, n_masks=128)
+criterion = MaXDeepLabLoss()
 
 num_params = []
 for pn, p in model.named_parameters():
     num_params.append(np.prod(p.size()))
-
 print(f'{sum(num_params):,} total parameters.')
->>> 61,849,316 total parameters.
+>>> 61,873,172 total parameters.
 
+P = batch['image']
+M = torch.randn((128, 8, 256))
+
+mask_out, classes, semantic = model(P, M)
+print(mask_out.shape, classes.shape, semantic.shape)
+>>> (torch.Size([8, 128, 640, 640]), torch.Size([8, 128, 202], torch.Size([8, 202, 640, 640])))
+
+loss = criterion((mask_out, classes, semantic), (batch['masks'], batch['labels'], batch['semantic_mask']))
+print(loss) #returns loss value and a dict of loss items for each loss
+>>> (tensor(-4.5043),
+ {'pq': 0.0689038634300232,
+  'instdisc': -11.75303840637207,
+  'maskid': 5.25504732131958,
+  'semantic': 5.465500354766846})
 ```
 
-(Reported number of parameters in the paper is 61.9M)
+(Note: Reported number of parameters in the paper is 61.9M)

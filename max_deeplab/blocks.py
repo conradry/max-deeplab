@@ -425,6 +425,7 @@ class MaskHead(nn.Module):
     def __init__(
         self,
         nplanes,
+        nout,
         kernel_size=5,
         padding=2,
         separable=True
@@ -434,7 +435,7 @@ class MaskHead(nn.Module):
         self.conv5x5 = conv_bn_relu(
             nplanes, nplanes, kernel_size, padding=padding, groups=groups
         )
-        self.conv1x1 = conv_bn_relu(nplanes, nplanes, 1, with_relu=False)
+        self.conv1x1 = conv_bn_relu(nplanes, nout, 1, with_relu=False)
 
     def forward(self, x):
         return self.conv1x1(self.conv5x5(x))
