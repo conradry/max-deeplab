@@ -29,6 +29,7 @@ MaX-DeepLab has a complex architecture, training procedure and loss function. An
 from max_deeplab.model import MaXDeepLabS
 from max_deeplab.losses import MaXDeepLabLoss
 from datasets.coco_panoptic import build
+from util.misc import collate_fn
 
 config = {}
 config['image_size'] = (640, 640)
