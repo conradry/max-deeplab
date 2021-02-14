@@ -39,7 +39,7 @@ def apply_mask(image, mask, color, alpha=0.5):
     return image
 
 
-def display_instances(image, masks, class_names, figsize=(16, 16), ax=None,
+def display_instances(image, masks, class_ids, class_names, figsize=(16, 16), ax=None,
                       show_mask=True, colors=None):
     """
     masks: [height, width, num_instances]
@@ -70,7 +70,7 @@ def display_instances(image, masks, class_names, figsize=(16, 16), ax=None,
         if not np.any(mask):
             continue
             
-        color = colors[i]
+        color = colors[class_ids[i]]
 
         # Label
         y, x = np.where(mask > 0)
@@ -82,18 +82,6 @@ def display_instances(image, masks, class_names, figsize=(16, 16), ax=None,
         # Mask
         if show_mask:
             masked_image = apply_mask(masked_image, mask, color)
-
-        # Mask Polygon
-        # Pad to ensure proper polygons for masks that touch image edges.
-        #padded_mask = np.zeros(
-        #    (mask.shape[0] + 2, mask.shape[1] + 2), dtype=np.uint8)
-        #padded_mask[1:-1, 1:-1] = mask
-        #contours = find_contours(padded_mask, 0.5)
-        #for verts in contours:
-        #    # Subtract the padding and flip (y, x) to (x, y)
-        #    verts = np.fliplr(verts) - 1
-        #    p = Polygon(verts, facecolor="none", edgecolor=color)
-        #    ax.add_patch(p)
             
     ax.imshow(masked_image.astype(np.uint8))
     if auto_show:
