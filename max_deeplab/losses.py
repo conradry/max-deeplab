@@ -104,13 +104,13 @@ class HungarianMatcher(nn.Module):
         return inp_pos_indices, tgt_pos_indices, inp_neg_indices
 
 class PQLoss(nn.Module):
-    def __init__(self, alpha=0.75, eps=1e-5, no_class_index=-1):
+    def __init__(self, alpha=0.75, eps=1e-5):
         super(PQLoss, self).__init__()
         self.alpha = alpha
         self.eps = eps
         self.xentropy = nn.CrossEntropyLoss(reduction='none')
-        self.no_class_index = no_class_index
         self.matcher = HungarianMatcher()
+        self.negative_xentropy = nn.CrossEntropyLoss()
 
     def forward(self, input_mask, input_class, target_mask, target_class, target_sizes):
         """
@@ -152,24 +152,19 @@ class PQLoss(nn.Module):
 
         cross_entropy = self.xentropy(matched_input_class, matched_target_class) #(NP,)
         dice = dice_score(matched_input_mask, matched_target_mask, self.eps) #(NP,)
-
+    
         #eqn 10
-        #NOTE: some people find negative losses irritating,
-        #-dice could be swapped for 1-dice without harm
-        l_pos = (class_weight * (-dice) + dice_weight * cross_entropy).mean()
-
-        if self.no_class_index == -1:
-            self.no_class_index = num_classes - 1
+        #(1 - dice) is so that the minimum loss value is 0 and not -1
+        l_pos = (class_weight * (1 - dice) + dice_weight * cross_entropy).mean()
 
         #eqn 11
-        negative_target_class = torch.full(
-            size=(len(negative_class),), fill_value=self.no_class_index,
-            dtype=target_class.dtype, device=target_class.device
+        negative_target_class = torch.zeros(
+            size=(len(negative_class),), dtype=target_class.dtype, device=target_class.device
         )
-        l_neg = self.xentropy(negative_class, negative_target_class).mean()
-
+        l_neg = self.negative_xentropy(negative_class, negative_target_class).mean()
+        
         #eqn 12
-        return self.alpha * l_pos * (1 - self.alpha) * l_neg
+        return self.alpha * l_pos + (1 - self.alpha) * l_neg
 
 #-----------------------
 ### Auxiliary Losses ###
@@ -210,21 +205,22 @@ class InstanceDiscLoss(nn.Module):
 
         #create logits and apply temperature
         logits = torch.einsum('bdhw,bkd->bkhw', mask_features, t)
-
-        #select target_masks and logits
-        #TODO: use logsumexp instead of exp and log separately.
-        m = target_mask[batch_indices, mask_indices] #(torch.prod(target_sizes), H, W)
+        logits = logits[batch_indices, mask_indices] #(torch.prod(target_sizes), H, W)
         logits /= self.temp
-        logits = torch.exp(logits[batch_indices, mask_indices]) #(torch.prod(target_sizes), H, W)
+
+        #select target_masks
+        m = target_mask[batch_indices, mask_indices] #(torch.prod(target_sizes), H, W)
 
         #flip so that there are HW examples for torch.prod(target_sizes) classes
         logits = rearrange(logits, 'k h w -> (h w) k')
         m = rearrange(m, 'k h w -> (h w) k')
 
         #eqn 17
-        numerator = (m * logits).sum(-1)
-        denominator = logits.sum(-1)
-        return -torch.log(numerator + self.eps / denominator + self.eps).mean()
+        numerator = torch.logsumexp(m * logits, dim=-1) #(HW,)
+        denominator = torch.logsumexp(logits, dim=-1) #(HW,)
+        
+        #log of quotient is difference of logs
+        return (-numerator + denominator).mean()
 
 class MaskIDLoss(nn.Module):
     def __init__(self):
@@ -266,15 +262,14 @@ class MaXDeepLabLoss(nn.Module):
         semantic_loss_weight=1,
         alpha=0.75,
         temp=0.3,
-        no_class_index=-1,
-        eps=1e-5,
+        eps=1e-5
     ):
         super(MaXDeepLabLoss, self).__init__()
         self.pqw = pq_loss_weight
         self.idw = instance_loss_weight
         self.miw = maskid_loss_weight
         self.ssw = semantic_loss_weight
-        self.pq_loss = PQLoss(alpha, eps, no_class_index)
+        self.pq_loss = PQLoss(alpha, eps)
         self.instance_loss = InstanceDiscLoss(temp, eps)
         self.maskid_loss = MaskIDLoss()
         self.semantic_loss = SemanticSegmentationLoss()
@@ -295,9 +290,9 @@ class MaXDeepLabLoss(nn.Module):
         maskid = self.maskid_loss(input_masks, gt_masks.argmax(1))
         semantic = self.semantic_loss(input_ss, gt_ss)
 
-        loss_items = {'pq': pq.item(), 'instdisc': instdisc.item(),
-                      'maskid': maskid.item(), 'semantic': semantic.item()}
+        loss_items = {'pq': pq.item(), 'semantic': semantic.item(), 
+                      'maskid': maskid.item(), 'instdisc': instdisc.item()}
 
-        total_loss = self.pqw * pq + self.idw * instdisc + self.miw * maskid + self.ssw * semantic
+        total_loss = self.pqw * pq + self.ssw * semantic + self.miw * maskid + self.idw * instdisc 
 
         return total_loss, loss_items

@@ -26,7 +26,7 @@ class linear_bn_relu(nn.Module):
         if with_bn:
             self.bn1 = nn.BatchNorm1d(nout)
         if with_relu:
-            self.relu = nn.ReLU(inplace=True)
+            self.relu = nn.ReLU(inplace=False)
 
     def forward(self, x):
         #assumed input is (N, B, C)
@@ -66,7 +66,7 @@ class conv_bn_relu(nn.Module):
         if with_bn:
             layers.append(nn.BatchNorm2d(nout))
         if with_relu:
-            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.ReLU(inplace=False))
 
         self.net = nn.Sequential(*layers)
 
@@ -227,11 +227,11 @@ class AxialBottleneck(nn.Module):
             conv_bn_relu(nin, width, kernel_size=1),
             AxialMultiHeadAttention(width, width, n_heads, kernel_size, axis='height'),
             AxialMultiHeadAttention(width, width, n_heads, kernel_size, stride=stride, axis='width'),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             conv_bn_relu(width, nplanes * self.expansion, kernel_size=1, with_relu=False)
         )
 
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.downsample = downsample
 
     def forward(self, x):
@@ -294,7 +294,7 @@ class DualPathXF(nn.Module):
         self.mem_fc1 = linear_bn_relu(nin_memory, nplanes)
         self.mem_qkv = linear_bn_relu(nplanes, nplanes * 2, with_relu=False)
         self.mem_fc2 = linear_bn_relu(nplanes, nin_memory, with_relu=False)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
 
         self.mem_ffn = nn.Sequential(
             linear_bn_relu(nin_memory, nplanes * self.expansion),
@@ -389,7 +389,7 @@ class DecoderBottleneck(nn.Module):
         self.upsample = nn.Upsample(
             scale_factor=upsample_factor, mode='bilinear', align_corners=True
         )
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
 
         #see Fig 9. of https://arxiv.org/abs/2003.07853
         self.identity_path = nn.Sequential(

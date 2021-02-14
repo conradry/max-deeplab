@@ -1,5 +1,5 @@
 """
-Copied without modification from https://github.com/facebookresearch/detr/blob/master/util/misc.py.
+Copied with modification from https://github.com/facebookresearch/detr/blob/master/util/misc.py.
 """
 
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved

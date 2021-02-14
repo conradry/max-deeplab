@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from einops import rearrange
+from einops import rearrange, repeat
 from torchvision.models.resnet import Bottleneck
 from .blocks import *
 
@@ -220,19 +220,22 @@ class MaXDeepLabS(nn.Module):
             conv_bn_relu(256, n_classes, 1, with_bn=False, with_relu=False),
             nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True)
         )
+        
+        self.global_memory = nn.Parameter(torch.randn((n_masks, 256)), requires_grad=True)
 
     def forward(self, x):
         return self.conv1x1(self.conv5x5(x))
 
-    def forward(self, P, M):
+    def forward(self, P):
         """
         P: pixel NestedTensor (B, 3, H, W)
-        M: memory tensor (N, B, 256)
         """
 
         #P is a nested tensor, extract the image data
         #see utils.misc.NestedTensor
-        P, mask = P.decompose()
+        P, sizes = P.decompose()
+        M = repeat(self.global_memory, 'n k -> n b k', b=P.size(0))
+        
         fmaps, mem = self.encoder(P, M)
         semantic_mask = self.semantic_head(fmaps[-1])
         mask_out, classes = self.decoder(fmaps, mem)
