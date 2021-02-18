@@ -15,6 +15,14 @@ import matplotlib.pyplot as plt
 from matplotlib import patches, lines
 from matplotlib.patches import Polygon
 
+def roll_image(image):
+    """helper for displaying images"""
+    image = np.rollaxis(image, 0, 3)
+    image -= image.min()
+    image /= image.max()
+    image *= 255
+    return image.astype(np.uint8)
+
 def random_colors(N, bright=True):
     """
     Generate random colors.
@@ -69,7 +77,7 @@ def display_instances(image, masks, class_ids, class_names, figsize=(16, 16), ax
     for i, mask in enumerate(masks):
         if not np.any(mask):
             continue
-            
+
         color = colors[class_ids[i]]
 
         # Label
@@ -82,7 +90,7 @@ def display_instances(image, masks, class_ids, class_names, figsize=(16, 16), ax
         # Mask
         if show_mask:
             masked_image = apply_mask(masked_image, mask, color)
-            
+
     ax.imshow(masked_image.astype(np.uint8))
     if auto_show:
         plt.show()

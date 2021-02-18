@@ -3,6 +3,7 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from torchvision.models.resnet import Bottleneck
 from .blocks import *
+from .backbone import MaXDeepLabSBackbone
 
 class MaXDeepLabSEncoder(nn.Module):
     def __init__(
@@ -10,87 +11,28 @@ class MaXDeepLabSEncoder(nn.Module):
         layers=[3, 4, 6, 3],
         im_size=640,
         nin_memory=256,
-        n_heads=8
+        n_heads=8,
+        in_channels=3
     ):
         super(MaXDeepLabSEncoder, self).__init__()
 
         self.base_width = 64
         self.nin = 64
         self.nin_memory = nin_memory
-        self.stem = InceptionStem(3, 128)
+        backbone = MaXDeepLabSBackbone(layers, im_size, n_heads, in_channels)
+        stages = backbone.get_stages()
+        self.stem = stages[0]
+        self.layer1 = stages[1]
+        self.layer2 = stages[2]
+        self.layer3 = stages[3]
 
-        self.layer1 = self._make_bottleneck_layer(64, layers[0], stride=1, first_layer=True)
-        self.layer2 = self._make_bottleneck_layer(128, layers[1], stride=2)
-
-        kernel_size = im_size // 8
-        self.layer3 = self._make_axial_layer(
-            256, layers[2], stride=2, n_heads=n_heads, kernel_size=kernel_size
-        )
-
+        #overwrite layer 4 and replace with dual path
+        del stages[4]
         kernel_size = im_size // 16
+        self.nin *= 16
         self.layer4 = self._make_dualpath_layer(
             512, layers[3], n_heads=n_heads, kernel_size=kernel_size
         )
-
-    def _make_bottleneck_layer(
-        self,
-        planes,
-        n_blocks,
-        stride=1,
-        first_layer=False
-    ):
-        block = Bottleneck
-        downsample = None
-        first_block_nin = self.nin * 2 if first_layer else self.nin
-
-        if stride != 1 or self.nin != planes * block.expansion:
-            downsample = conv_bn_relu(
-                first_block_nin, planes * block.expansion, 1, stride, with_relu=False
-            )
-
-        layers = []
-        layers.append(
-            block(first_block_nin, planes, stride, downsample, base_width=self.base_width)
-        )
-        self.nin = planes * block.expansion
-        for _ in range(1, n_blocks):
-            layers.append(
-                block(self.nin, planes, base_width=self.base_width)
-            )
-
-        return nn.Sequential(*layers)
-
-    def _make_axial_layer(
-        self,
-        planes,
-        n_blocks,
-        stride=1,
-        n_heads=8,
-        kernel_size=56
-    ):
-        block = AxialBottleneck
-        downsample = None
-        if stride != 1 or self.nin != planes * block.expansion:
-            downsample = conv_bn_relu(
-                self.nin, planes * block.expansion, 1, stride, with_relu=False
-            )
-
-        layers = []
-        layers.append(
-            block(self.nin, planes, stride, downsample, self.base_width,
-            n_heads=n_heads, kernel_size=kernel_size
-            )
-        )
-
-        self.nin = planes * block.expansion
-        kernel_size = kernel_size // stride
-        for _ in range(1, n_blocks):
-            layers.append(
-                block(self.nin, planes, base_width=self.base_width,
-                n_heads=n_heads, kernel_size=kernel_size)
-            )
-
-        return nn.Sequential(*layers)
 
     def _make_dualpath_layer(
         self,
@@ -220,7 +162,7 @@ class MaXDeepLabS(nn.Module):
             conv_bn_relu(256, n_classes, 1, with_bn=False, with_relu=False),
             nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True)
         )
-        
+
         self.global_memory = nn.Parameter(torch.randn((n_masks, 256)), requires_grad=True)
 
     def forward(self, x):
@@ -235,7 +177,7 @@ class MaXDeepLabS(nn.Module):
         #see utils.misc.NestedTensor
         P, sizes = P.decompose()
         M = repeat(self.global_memory, 'n k -> n b k', b=P.size(0))
-        
+
         fmaps, mem = self.encoder(P, M)
         semantic_mask = self.semantic_head(fmaps[-1])
         mask_out, classes = self.decoder(fmaps, mem)
