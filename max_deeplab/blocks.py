@@ -272,11 +272,6 @@ class DualPathXF(nn.Module):
             n_heads=n_heads, kernel_size=kernel_size
         )
 
-        #I'm assuming that attention is multihead
-        #it's never stated explicitly...
-
-        #pixel qkv
-        #maybe another conv before?
         nin_pixel = nplanes * self.expansion
 
         self.p2m_conv1 = conv_bn_relu(nin_pixel, nplanes, 1)
