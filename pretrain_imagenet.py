@@ -33,7 +33,7 @@ parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('-t', '--tpu', type=bool, action='store_true',
+parser.add_argument('--tpu', type=bool, action='store_true',
                     help='use TPU accelerator')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
